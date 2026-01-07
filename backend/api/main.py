@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import pandas as pd
 
-from api.schemas import CaseInput
+from .schemas import CaseInput
 from utils.text_cleaning import clean_text
 from utils.rules import rule_based_scores
 
@@ -21,8 +21,8 @@ app.add_middleware(
 
 
 # Load ML artifacts
-model = joblib.load("ipc_model.pkl")
-mlb = joblib.load("ipc_labels.pkl")
+model = joblib.load("ml/ipc_model.pkl")
+mlb = joblib.load("ml/ipc_labels.pkl")
 
 # Load IPC law knowledge
 ipc_df = pd.read_csv("data/processed/ipc_sections.csv")
