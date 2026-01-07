@@ -4,9 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import pandas as pd
 
-from backend.api.schemas import CaseInput
-from backend.utils.text_cleaning import clean_text
-from backend.utils.rules import rule_based_scores
+from api.schemas import CaseInput
+from utils.text_cleaning import clean_text
+from utils.rules import rule_based_scores
 
 app = FastAPI(title="IPC Prediction API")
 
@@ -25,7 +25,7 @@ model = joblib.load("ipc_model.pkl")
 mlb = joblib.load("ipc_labels.pkl")
 
 # Load IPC law knowledge
-ipc_df = pd.read_csv("backend/data/processed/ipc_sections.csv")
+ipc_df = pd.read_csv("data/processed/ipc_sections.csv")
 
 @app.post("/ipc/predict")
 def predict_ipc(case: CaseInput):
