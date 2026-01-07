@@ -13,18 +13,22 @@ RULE_KEYWORDS = {
     "354": ["harassed", "outraged", "molested", "woman"]
 }
 
+SENSITIVE_IPCS = {"326", "354"}
+
 def rule_based_scores(text: str) -> dict:
     """
     Returns a score per IPC section based on keyword matches.
     """
     scores = {}
-
+    matched_ipcs = set()
     for ipc, keywords in RULE_KEYWORDS.items():
-        score = 0
+        # score = 0
         for kw in keywords:
             if kw in text:
-                score += 1
-        if score > 0:
-            scores[ipc] = score
+        #         score += 1
+        # if score > 0:
+        #     scores[ipc] = score
+                scores[ipc] = scores.get(ipc, 0) + 1
+                matched_ipcs.add(ipc)
 
-    return scores
+    return scores, matched_ipcs

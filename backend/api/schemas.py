@@ -1,9 +1,9 @@
 # request / response models
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List
 
 class CaseInput(BaseModel):
-    text: str
+    text: str = Field(..., min_length=7)
 
 class PredictionResponse(BaseModel):
     ipc_section: str
