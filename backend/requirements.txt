@@ -3,3 +3,7 @@ uvicorn
 pandas
 scikit-learn
 pypdf2
+joblib
+pydantic
+python-multipart
+numpy
