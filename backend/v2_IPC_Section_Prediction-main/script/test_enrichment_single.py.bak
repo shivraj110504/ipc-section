@@ -1,0 +1,772 @@
+import json
+import os
+import requests
+import re
+from pathlib import Path
+from jsonschema import Draft202012Validator
+
+# =========================
+# CONFIG
+# =========================
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("OPENROUTER_API_KEY environment variable not set")
+MODEL = "meta-llama/llama-3-8b-instruct"
+
+HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "HTTP-Referer": "http://localhost",
+    "Content-Type": "application/json"
+}
+
+# =========================
+# LOAD INPUT + FILE PATHS
+# =========================
+BASE_DIR = Path(__file__).resolve().parents[1]
+INPUT_PATH = BASE_DIR / "data" / "ipc_cleaned_v4.json"
+SCHEMA_PATH = BASE_DIR / "ipc_enriched_v1.schema.json"
+DRAFT_PATH = BASE_DIR / "data" / "ipc_enriched_v1_draft.json"
+FAILED_LOG_PATH = BASE_DIR / "data" / "failed_sections.log"
+
+with INPUT_PATH.open("r", encoding="utf-8") as f:
+    data = json.load(f)
+
+with SCHEMA_PATH.open("r", encoding="utf-8") as f:
+    schema = json.load(f)
+
+validator = Draft202012Validator(schema)
+item_validator = Draft202012Validator(schema["items"])
+
+STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "such", "shall", "have",
+    "has", "been", "are", "was", "were", "any", "all", "not", "but", "under", "over", "than",
+    "who", "whom", "whose", "where", "when", "which", "what", "why", "how", "may", "can", "will",
+    "his", "her", "their", "them", "they", "you", "your", "our", "its", "within", "outside"
+}
+
+WEAK_WORDS = {
+    "code", "law", "title", "extent", "section", "introduction", "application", "operation"
+}
+
+GENERIC_FALLBACK_PHRASES = [
+    "criminal liability in everyday disputes",
+    "rights and duties under criminal law",
+    "how criminal responsibility is decided",
+    "when conduct becomes a criminal issue",
+    "practical meaning for common legal complaints"
+]
+
+SUMMARY_TAILS = [
+    "In practical terms, this guides how responsibility is judged in day-to-day disputes.",
+    "In real complaints, this helps people understand what authorities can legally enforce.",
+    "For ordinary legal disputes, this sets the boundary between liability and non-liability.",
+    "For citizens, this explains how the rule is applied when facts are examined."
+]
+
+EDITORIAL_NOISE_PATTERNS = [
+    r"\bthe act has been amended\b",
+    r"\bsubs?\.\s*by\s*act\b",
+    r"\brep\.?\s*,?\s*by\s*",
+    r"\bins\.?\s*by\s*act\b",
+    r"\bibid\.?\b",
+    r"\bomitted by act\b",
+    r"\breg\.\s*\d+\s*of\b",
+    r"\bfor\s+\"the states\"\b"
+]
+
+NON_SEMANTIC_KEYWORD_PATTERNS = [
+    r"^word\s+",
+    r"^words\s+",
+    r"^only\s+every$",
+    r"^india\s+india$",
+    r"^whole\s+india$",
+    r"^indian\s+penal$",
+    r"^person\s+said$"
+]
+
+draft_records = []
+
+# =========================
+# PROMPTS
+# =========================
+
+
+system_prompt = """
+You are a legal data transformation engine.
+
+STRICT RULES:
+
+1. Summary must be 2 to 4 complete sentences.
+2. Plain English only.
+3. Do NOT mention IPC or Section.
+4. Keywords must be lowercase only.
+5. Keywords must be multi-word phrases (at least 2 words each).
+6. Keywords must reflect how a citizen would describe a legal issue.
+7. Avoid generic words like "code", "title", "extent", "law".
+8. 5 to 8 keywords only.
+9. offence_type must match one of the provided categories.
+10. Output ONLY valid JSON.
+"""
+
+# =========================
+# API CALL
+# =========================
+
+def call_llm(section):
+    user_prompt = f"""
+Transform the following IPC section into structured enrichment JSON.
+
+Input:
+
+law_type: IPC
+section_number: {section["section_number"]}
+section_title: {section["section_title"]}
+full_text: {section["bare_text"]}
+
+Return JSON with:
+
+{{
+  "law_type": "IPC",
+  "section_number": "...",
+  "section_title": "...",
+  "full_text": "...",
+  "summary": "...",
+  "keywords": ["...", "..."],
+  "offence_type": "..."
+}}
+
+offence_type must be one of:
+Property Crime
+Violent Crime
+Fraud / Cheating
+Sexual Offence
+Public Servant Offence
+Abetment
+General Exception
+Punishment
+Other
+
+Return ONLY JSON.
+"""
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.2,
+        "top_p": 1,
+        "max_tokens": 800
+    }
+
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=HEADERS,
+        json=payload,
+        timeout=60
+    )
+    response.raise_for_status()
+    return response.json()
+
+# =========================
+# NORMALIZATION LAYER
+# =========================
+
+def tokenize(text):
+    return re.findall(r"[a-z]{3,}", str(text).lower())
+
+
+def normalize_space(text):
+    text = str(text)
+    text = text.replace("\u200b", "").replace("\ufeff", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([,.;:])", r"\1", text)
+    return text
+
+
+def clean_full_text_statutory(text):
+    cleaned = normalize_space(text)
+
+    tail_markers = [
+        r"\bThe\s+Act\s+has\s+been\s+amended\b",
+        r"\bRep\.?\s*,?\s*by\b",
+        r"\bSubs?\.?\s*by\s*Act\b",
+        r"\bIns\.?\s*by\s*Act\b",
+        r"\bibid\.?\b",
+        r"\bomitted\s+by\s+Act\b"
+    ]
+    for marker in tail_markers:
+        m = re.search(marker, cleaned, flags=re.IGNORECASE)
+        if m:
+            cleaned = cleaned[:m.start()].rstrip(" ,;:-")
+            break
+
+    cleaned = re.sub(r"\b\d+\.?\s*(for|ins\.?|rep\.?|subs\.?|ibid\.?)[^.;:]*[.;:]?", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\*\s*\*\s*\*\s*\*+", " ", cleaned)
+    cleaned = normalize_space(cleaned)
+
+    return cleaned if len(cleaned) >= 10 else normalize_space(text)
+
+
+def build_ngram_phrases(tokens, min_n=2, max_n=4):
+    phrases = []
+    seen = set()
+    for n in range(min_n, max_n + 1):
+        for i in range(0, len(tokens) - n + 1):
+            chunk = tokens[i:i + n]
+            if chunk[0] in STOPWORDS or chunk[-1] in STOPWORDS:
+                continue
+            if any(word in WEAK_WORDS for word in chunk):
+                continue
+            content_words = [w for w in chunk if w not in STOPWORDS]
+            if len(content_words) < 2:
+                continue
+            phrase = " ".join(chunk)
+            if phrase not in seen:
+                seen.add(phrase)
+                phrases.append(phrase)
+    return phrases
+
+
+def clean_keyword_phrase(phrase):
+    phrase = normalize_space(phrase).lower()
+    phrase = re.sub(r"[^a-z0-9\s\-]", " ", phrase)
+    phrase = normalize_space(phrase)
+    return phrase
+
+
+def is_semantic_keyword(phrase):
+    if not isinstance(phrase, str):
+        return False
+    phrase = clean_keyword_phrase(phrase)
+    if len(phrase.split()) < 2:
+        return False
+    if any(re.search(p, phrase) for p in NON_SEMANTIC_KEYWORD_PATTERNS):
+        return False
+    if any(word in WEAK_WORDS for word in phrase.split()):
+        return False
+    return True
+
+
+def section_specific_keyword_pool(source_section):
+    title = str(source_section.get("section_title", "")).lower()
+    full_text = str(source_section.get("bare_text", "")).lower()
+
+    title_tokens = tokenize(title)
+    text_tokens = tokenize(full_text)
+
+    title_phrases = build_ngram_phrases(title_tokens, 2, 4)
+    text_phrases = build_ngram_phrases(text_tokens[:140], 2, 4)
+
+    candidates = []
+    seen = set()
+
+    title_compact = normalize_space(title)
+    term_match = re.search(r'"([a-z][a-z\s\-]{2,50})"', title_compact)
+    if term_match:
+        term = term_match.group(1).strip()
+        candidates.extend([
+            f"meaning of {term}",
+            f"who counts as {term}",
+            f"legal definition of {term}"
+        ])
+
+    text_lower = normalize_space(full_text)
+    rule_phrases = []
+    if "within india" in text_lower:
+        rule_phrases.extend(["offences committed within india", "criminal liability within india"])
+    if "beyond india" in text_lower or "extra-territorial" in text_lower or "without and beyond india" in text_lower:
+        rule_phrases.extend(["offences committed outside india", "extra territorial criminal liability"])
+    if "nothing is an offence" in text_lower or "general exception" in text_lower:
+        rule_phrases.extend(["situations where acts are not offences", "general exceptions to criminal liability"])
+    if "public servant" in text_lower:
+        rule_phrases.extend(["who is treated as a public servant", "duties of public servants"])
+    if "movable property" in text_lower:
+        rule_phrases.extend(["what counts as movable property", "property covered under movable property"])
+    if "wrongful gain" in text_lower:
+        rule_phrases.append("wrongful gain and wrongful loss")
+    if "dishonestly" in text_lower:
+        rule_phrases.append("acts done with dishonest intention")
+    if "fraudulently" in text_lower or "intent to defraud" in text_lower:
+        rule_phrases.append("acts done with intent to defraud")
+    if "male or female" in text_lower:
+        rule_phrases.append("gender neutral legal interpretation")
+    if "singular number include the plural" in text_lower:
+        rule_phrases.append("singular and plural legal interpretation")
+
+    for phrase in rule_phrases:
+        phrase = clean_keyword_phrase(phrase)
+        if is_semantic_keyword(phrase):
+            candidates.append(phrase)
+
+    for phrase in title_phrases + text_phrases:
+        phrase = clean_keyword_phrase(phrase)
+        if phrase in seen:
+            continue
+        if is_semantic_keyword(phrase):
+            seen.add(phrase)
+            candidates.append(phrase)
+
+    return list(dict.fromkeys(candidates))
+
+
+def semantic_booster_phrases(source_section):
+    title = normalize_space(source_section.get("section_title", "")).lower()
+    text = normalize_space(source_section.get("bare_text", "")).lower()
+
+    tokens = [t for t in tokenize(title) if t not in STOPWORDS and t not in WEAK_WORDS]
+    topic = " ".join(tokens[:4]).strip()
+
+    boosters = []
+    if topic and len(topic.split()) >= 1:
+        boosters.extend([
+            f"legal meaning of {topic}",
+            f"complaints involving {topic}",
+            f"criminal disputes about {topic}"
+        ])
+
+    if "means" in text or "denotes" in text or "includes" in text:
+        boosters.extend([
+            "how legal terms are interpreted",
+            "meaning of terms in criminal complaints"
+        ])
+
+    if "punishment" in text:
+        boosters.extend([
+            "when punishment can be imposed",
+            "who can be held liable"
+        ])
+
+    if "public servant" in text:
+        boosters.extend([
+            "official duties in public office",
+            "liability connected to public office"
+        ])
+
+    cleaned = []
+    for phrase in boosters:
+        phrase = clean_keyword_phrase(phrase)
+        if is_semantic_keyword(phrase):
+            cleaned.append(phrase)
+
+    return list(dict.fromkeys(cleaned))
+
+
+def count_section_specific_keywords(keywords, source_section):
+    haystack = f"{source_section.get('section_title', '')} {source_section.get('bare_text', '')}".lower()
+    count = 0
+    for kw in keywords:
+        if kw in GENERIC_FALLBACK_PHRASES:
+            continue
+        tokens = [t for t in kw.split() if t not in STOPWORDS]
+        token_hits = sum(1 for t in tokens if t in haystack)
+        if len(tokens) >= 2 and token_hits >= 2:
+            count += 1
+            continue
+        if token_hits >= 1 and re.match(r"^(meaning of|legal definition of|definition of|who counts as)", kw):
+            count += 1
+    return count
+
+
+def build_semantic_summary(source_section, llm_summary):
+    title = normalize_space(source_section.get("section_title", "")).strip().strip('"').rstrip(".")
+    text = normalize_space(source_section.get("bare_text", "")).lower()
+    raw = normalize_space(llm_summary)
+    raw_sentences = [s.strip() for s in re.split(r"[.!?]+", raw) if s.strip()]
+
+    if 2 <= len(raw_sentences) <= 4 and not raw.lower().startswith("this provision addresses"):
+        summary = raw
+    else:
+        if "punishment" in text:
+            first = f"It explains how {title.lower()} is applied when deciding criminal liability."
+        elif "nothing is an offence" in text or "general exception" in text:
+            first = f"It clarifies when conduct connected to {title.lower()} is treated as an exception to punishment."
+        elif "means" in text or "denotes" in text or "includes" in text:
+            first = f"It defines the meaning of {title.lower()} for use in criminal complaints and investigations."
+        else:
+            first = f"It clarifies the legal effect of {title.lower()} in practical criminal disputes."
+
+        section_num = str(source_section.get("section_number", "0"))
+        numeric_part = int(re.match(r"\d+", section_num).group(0)) if re.match(r"\d+", section_num) else 0
+        second = SUMMARY_TAILS[numeric_part % len(SUMMARY_TAILS)]
+        summary = f"{first} {second}"
+
+    if sentence_count(summary) < 2:
+        section_num = str(source_section.get("section_number", "0"))
+        numeric_part = int(re.match(r"\d+", section_num).group(0)) if re.match(r"\d+", section_num) else 0
+        summary = summary.rstrip(".") + ". " + SUMMARY_TAILS[numeric_part % len(SUMMARY_TAILS)]
+
+    if len(summary) < 50:
+        summary = summary.rstrip(".") + ". " + "This gives a practical explanation without expanding beyond the provided text."
+
+    sentences = [s.strip() for s in re.split(r"[.!?]+", summary) if s.strip()]
+    if len(sentences) > 4:
+        summary = ". ".join(sentences[:4]) + "."
+
+    return normalize_space(summary)
+
+
+def normalize_record(record, source_section):
+    normalized = record.copy()
+
+    normalized["law_type"] = "IPC"
+    normalized["section_number"] = str(source_section.get("section_number", "")).strip()
+    normalized["section_title"] = str(source_section.get("section_title", "")).strip()
+    normalized["full_text"] = clean_full_text_statutory(source_section.get("bare_text", ""))
+
+    # -----------------------------
+    # 1️⃣ KEYWORD GUARD LAYER
+    # -----------------------------
+
+    cleaned_keywords = []
+
+    for kw in normalized.get("keywords", []):
+        kw = clean_keyword_phrase(kw)
+        if is_semantic_keyword(kw):
+            cleaned_keywords.append(kw)
+
+    # Remove duplicates
+    unique_keywords = list(dict.fromkeys(cleaned_keywords))
+
+    specific_pool = section_specific_keyword_pool(source_section)
+    booster_pool = semantic_booster_phrases(source_section)
+
+    for phrase in specific_pool:
+        if phrase not in unique_keywords:
+            unique_keywords.append(phrase)
+        if count_section_specific_keywords(unique_keywords, source_section) >= 3:
+            break
+
+    # -----------------------------
+    # 2️⃣ FALLBACK GENERATION IF WEAK
+    # -----------------------------
+
+    if len(unique_keywords) < 5:
+        for phrase in GENERIC_FALLBACK_PHRASES:
+            if phrase not in unique_keywords:
+                unique_keywords.append(phrase)
+            generic_count = sum(1 for kw in unique_keywords if kw in GENERIC_FALLBACK_PHRASES)
+            if len(unique_keywords) >= 5 or generic_count >= 2:
+                break
+
+    # enforce at most 2 generic fallback phrases
+    generic_used = []
+    specific_used = []
+    for phrase in unique_keywords:
+        if phrase in GENERIC_FALLBACK_PHRASES:
+            if len(generic_used) < 2:
+                generic_used.append(phrase)
+        else:
+            specific_used.append(phrase)
+
+    unique_keywords = specific_used + generic_used
+
+    # make sure we still have at least 5 keywords while keeping specificity
+    if len(unique_keywords) < 5:
+        for phrase in specific_pool + booster_pool:
+            if phrase not in unique_keywords:
+                unique_keywords.append(phrase)
+            if len(unique_keywords) >= 5:
+                break
+
+    if len(unique_keywords) < 5:
+        for phrase in GENERIC_FALLBACK_PHRASES:
+            if phrase not in unique_keywords and sum(1 for kw in unique_keywords if kw in GENERIC_FALLBACK_PHRASES) < 2:
+                unique_keywords.append(phrase)
+            if len(unique_keywords) >= 5:
+                break
+
+    if len(unique_keywords) < 5:
+        title_tokens = [t for t in tokenize(source_section.get("section_title", "")) if t not in STOPWORDS and t not in WEAK_WORDS]
+        topic = " ".join(title_tokens[:3]).strip() if title_tokens else "criminal responsibility"
+        deterministic_fill = [
+            f"legal meaning {topic}",
+            f"citizen complaints {topic}",
+            f"criminal disputes {topic}",
+            f"liability rules {topic}",
+            f"practical guidance {topic}"
+        ]
+        for phrase in deterministic_fill:
+            phrase = clean_keyword_phrase(phrase)
+            if is_semantic_keyword(phrase) and phrase not in unique_keywords:
+                unique_keywords.append(phrase)
+            if len(unique_keywords) >= 5:
+                break
+
+    # final deterministic ordering and caps
+    normalized["keywords"] = [kw for kw in list(dict.fromkeys(unique_keywords)) if is_semantic_keyword(kw)][:8]
+
+    if len(normalized["keywords"]) < 5:
+        ctx_tokens = [t for t in tokenize(normalized.get("full_text", "")) if t not in STOPWORDS and t not in WEAK_WORDS]
+        ctx_tokens = list(dict.fromkeys(ctx_tokens))[:4] if ctx_tokens else ["liability"]
+        extra_phrases = []
+        for t in ctx_tokens:
+            extra_phrases.extend([
+                f"practical complaints about {t}",
+                f"legal disputes involving {t}",
+                f"everyday issues linked to {t}"
+            ])
+        for phrase in extra_phrases:
+            phrase = clean_keyword_phrase(phrase)
+            if is_semantic_keyword(phrase) and phrase not in normalized["keywords"]:
+                normalized["keywords"].append(phrase)
+            if len(normalized["keywords"]) >= 5:
+                break
+
+    normalized["keywords"] = normalized["keywords"][:8]
+
+    # -----------------------------
+    # 3️⃣ SUMMARY ENFORCEMENT
+    # -----------------------------
+
+    normalized["summary"] = build_semantic_summary(source_section, normalized.get("summary", ""))
+
+    allowed_offence_types = {
+        "Property Crime",
+        "Violent Crime",
+        "Fraud / Cheating",
+        "Sexual Offence",
+        "Public Servant Offence",
+        "Abetment",
+        "General Exception",
+        "Punishment",
+        "Other"
+    }
+
+    offence_type_raw = str(normalized.get("offence_type", "")).strip()
+    matched = None
+    for option in allowed_offence_types:
+        if offence_type_raw.lower() == option.lower():
+            matched = option
+            break
+    normalized["offence_type"] = matched if matched else "Other"
+
+    return normalized
+
+# =========================
+# PARSE HELPERS
+# =========================
+
+def extract_json_object(text):
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\\s*```$", "", text)
+        text = text.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        return json.loads(candidate)
+
+    raise json.JSONDecodeError("No JSON object found", text, 0)
+
+
+def has_no_empty_fields(record):
+    for value in record.values():
+        if value is None:
+            return False
+        if isinstance(value, str) and value.strip() == "":
+            return False
+    return True
+
+
+def sentence_count(text):
+    parts = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+    return len(parts)
+
+
+def keyword_rules_ok(keywords):
+    if not isinstance(keywords, list):
+        return False
+    if len(keywords) < 5 or len(keywords) > 8:
+        return False
+    if len(set(keywords)) != len(keywords):
+        return False
+    for kw in keywords:
+        if not isinstance(kw, str):
+            return False
+        phrase = kw.strip()
+        if phrase == "":
+            return False
+        if len(phrase.split()) < 2:
+            return False
+        if not is_semantic_keyword(phrase):
+            return False
+    return True
+
+
+def keyword_signature(keywords):
+    return tuple(sorted(keywords))
+
+
+def ensure_distinct_keywords(record, source_section, used_signatures):
+    keywords = list(record.get("keywords", []))
+    sig = keyword_signature(keywords)
+    if sig not in used_signatures:
+        return record
+
+    pool = section_specific_keyword_pool(source_section)
+    for phrase in pool:
+        if phrase in keywords:
+            continue
+        replaced = False
+        for i, kw in enumerate(keywords):
+            if kw in GENERIC_FALLBACK_PHRASES:
+                keywords[i] = phrase
+                replaced = True
+                break
+        if not replaced and len(keywords) < 8:
+            keywords.append(phrase)
+        elif not replaced:
+            keywords[-1] = phrase
+
+        keywords = list(dict.fromkeys(keywords))[:8]
+        if 5 <= len(keywords) <= 8 and keyword_signature(keywords) not in used_signatures:
+            record["keywords"] = keywords
+            return record
+
+    return record
+
+
+def validate_enriched(record, source_section):
+    errors = sorted(item_validator.iter_errors(record), key=lambda e: e.path)
+    if errors:
+        return False, errors[0].message
+    if sentence_count(record.get("summary", "")) < 2:
+        return False, "summary must have at least 2 sentences"
+    if not keyword_rules_ok(record.get("keywords", [])):
+        return False, "keywords must be 5-8 unique multi-word phrases"
+    generic_count = sum(1 for kw in record.get("keywords", []) if kw in GENERIC_FALLBACK_PHRASES)
+    if generic_count > 2:
+        return False, "keywords contain more than 2 generic fallback phrases"
+    if count_section_specific_keywords(record.get("keywords", []), source_section) < 3:
+        return False, "keywords must include at least 3 section-specific phrases"
+    if not has_no_empty_fields(record):
+        return False, "record contains empty fields"
+    if any(re.search(p, record.get("full_text", ""), flags=re.IGNORECASE) for p in EDITORIAL_NOISE_PATTERNS):
+        return False, "full_text contains editorial amendment noise"
+    return True, "OK"
+
+
+# =========================
+# BATCH PIPELINE (SECTIONS 1-25)
+# =========================
+
+START_SECTION = 1
+END_SECTION = 25
+
+if FAILED_LOG_PATH.exists():
+    FAILED_LOG_PATH.unlink()
+
+existing_numbers = set()
+
+used_keyword_signatures = set()
+
+source_sections = [
+    row for row in data
+    if START_SECTION <= int(re.match(r"\d+", str(row.get("section_number", "0"))).group(0)) <= END_SECTION
+]
+processed = 0
+added = 0
+
+for section in source_sections:
+    processed += 1
+    section_number = str(section.get("section_number", "")).strip()
+
+    if section_number in existing_numbers:
+        print(f"[{processed}/{len(source_sections)}] {section_number}: skipped (already in draft)")
+        continue
+
+    success = False
+    last_error = "unknown error"
+
+    for attempt in range(1, 3):
+        try:
+            result = call_llm(section)
+            if "choices" not in result or not result["choices"]:
+                raise ValueError(f"LLM response missing choices: {result}")
+
+            raw_output = result["choices"][0]["message"]["content"]
+            parsed = extract_json_object(raw_output)
+            normalized = normalize_record(parsed, section)
+            normalized = ensure_distinct_keywords(normalized, section, used_keyword_signatures)
+
+            is_valid, reason = validate_enriched(normalized, section)
+            if not is_valid:
+                last_error = reason
+                print(f"[{processed}/{len(source_sections)}] {section_number}: attempt {attempt} failed validation ({reason})")
+                continue
+
+            draft_records.append(normalized)
+            existing_numbers.add(section_number)
+            used_keyword_signatures.add(keyword_signature(normalized.get("keywords", [])))
+            with DRAFT_PATH.open("w", encoding="utf-8") as f:
+                json.dump(draft_records, f, ensure_ascii=False, indent=2)
+
+            added += 1
+            success = True
+            print(f"[{processed}/{len(source_sections)}] {section_number}: success (added, total added this run={added})")
+            break
+
+        except Exception as exc:
+            last_error = str(exc)
+            print(f"[{processed}/{len(source_sections)}] {section_number}: attempt {attempt} error ({exc})")
+
+    if not success:
+        with FAILED_LOG_PATH.open("a", encoding="utf-8") as logf:
+            logf.write(f"{section_number}\n")
+        print(f"[{processed}/{len(source_sections)}] {section_number}: failed after retry, logged to {FAILED_LOG_PATH.name}")
+
+print("\nBatch complete.")
+print(f"Sections processed: {processed}")
+print(f"Valid records added this run: {added}")
+print(f"Draft path: {DRAFT_PATH}")
+
+# =========================
+# POST-RUN VERIFICATION
+# =========================
+
+schema_valid = True
+try:
+    validator.validate(draft_records)
+except Exception:
+    schema_valid = False
+
+signatures = [keyword_signature(r.get("keywords", [])) for r in draft_records]
+no_identical_keyword_sets = len(signatures) == len(set(signatures))
+
+summaries = [normalize_space(r.get("summary", "")) for r in draft_records]
+summaries_semantically_distinct = (
+    len(summaries) == len(set(summaries))
+    and all(not s.lower().startswith("this provision addresses") for s in summaries)
+    and all(2 <= sentence_count(s) <= 4 for s in summaries)
+)
+
+keywords_semantically_coherent = all(
+    keyword_rules_ok(r.get("keywords", []))
+    and count_section_specific_keywords(r.get("keywords", []), {
+        "section_title": r.get("section_title", ""),
+        "bare_text": r.get("full_text", "")
+    }) >= 3
+    for r in draft_records
+)
+
+no_editorial_noise_in_full_text = all(
+    not any(re.search(p, r.get("full_text", ""), flags=re.IGNORECASE) for p in EDITORIAL_NOISE_PATTERNS)
+    for r in draft_records
+)
+
+print(f"schema_valid={schema_valid}")
+print(f"no_identical_keyword_sets={no_identical_keyword_sets}")
+print(f"summaries_semantically_distinct={summaries_semantically_distinct}")
+print(f"keywords_semantically_coherent={keywords_semantically_coherent}")
+print(f"no_editorial_noise_in_full_text={no_editorial_noise_in_full_text}")

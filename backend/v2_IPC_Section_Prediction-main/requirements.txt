@@ -1,0 +1,8 @@
+# Python 3.11.9
+fastapi==0.133.0
+uvicorn==0.41.0
+requests==2.32.5
+chromadb==1.5.1
+pydantic==2.12.5
+jsonschema==4.26.0
+python-dotenv==1.2.1

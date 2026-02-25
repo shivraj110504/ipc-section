@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+IPC_Pred_Rebuild/
+
+# ChromaDB local storage
+script/chroma_ipc_v1/
+
+# IDE
+.vscode/
+.idea/
