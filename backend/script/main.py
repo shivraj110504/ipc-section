@@ -53,13 +53,16 @@ def predict_ipc(case: CaseInput):
 
     suggestion = random.choice(SUGGESTIONS)
 
+    explanation_text = rag_output.get("explanation", "")
+
     return {
         "prediction": {
             "ipc_section": f"IPC {ipc_code}" if ipc_code else None,
             "title": title,
             "confidence": confidence,
         },
-        "explanation": rag_output.get("explanation", ""),
+        "explanation": explanation_text,
+        "why": rag_output.get("why") or explanation_text,  # <-- Added for structural compatibility
         "suggestion": suggestion,
         "disclaimer": "This is an AI-assisted legal awareness tool.",
     }
