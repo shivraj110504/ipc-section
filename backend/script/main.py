@@ -34,6 +34,11 @@ SUGGESTIONS = [
 ]
 
 
+@app.get("/")
+def read_root():
+    return {"status": "ok", "message": "IPC Prediction API is running"}
+
+
 @app.post("/ipc/predict")
 def predict_ipc(case: CaseInput):
     raw_text = case.text.strip()
