@@ -8,21 +8,28 @@ from fastapi.middleware.cors import CORSMiddleware
 # Load environment variables from .env file
 load_dotenv()
 
+print("--- BACKEND STARTING UP ---")
+
 try:
     from .schemas import CaseInput
     from .ipc_reasoning_engine import predict_ipc_section
-except (ImportError, ValueError):
-    from schemas import CaseInput
-    from ipc_reasoning_engine import predict_ipc_section
+    print("--- IMPORTS SUCCESSFUL ---")
+except Exception as e:
+    print(f"--- IMPORT ERROR: {str(e)} ---")
+    # Fallback for different execution contexts
+    try:
+        from schemas import CaseInput
+        from ipc_reasoning_engine import predict_ipc_section
+        print("--- FALLBACK IMPORTS SUCCESSFUL ---")
+    except Exception as e2:
+        print(f"--- FALLBACK IMPORT ERROR: {str(e2)} ---")
+        raise e
 
 app = FastAPI(title="IPC Prediction API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://nyay-setu-prod.vercel.app",
-        "http://localhost:3000",
-    ],
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
