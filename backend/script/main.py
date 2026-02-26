@@ -1,7 +1,12 @@
 import random
+import os
+from dotenv import load_dotenv
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Load environment variables from .env file
+load_dotenv()
 
 try:
     from script.schemas import CaseInput
@@ -56,13 +61,14 @@ def predict_ipc(case: CaseInput):
     explanation_text = rag_output.get("explanation", "")
 
     return {
+        "input_text": raw_text,
         "prediction": {
             "ipc_section": f"IPC {ipc_code}" if ipc_code else None,
             "title": title,
             "confidence": confidence,
         },
         "explanation": explanation_text,
-        "why": rag_output.get("why") or explanation_text,  # <-- Added for structural compatibility
+        "why": rag_output.get("why") or explanation_text,
         "suggestion": suggestion,
         "disclaimer": "This is an AI-assisted legal awareness tool.",
     }
