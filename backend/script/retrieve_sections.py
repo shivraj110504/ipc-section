@@ -8,8 +8,12 @@ import requests
 
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-if not OPENROUTER_API_KEY:
-    raise RuntimeError("OPENROUTER_API_KEY environment variable not set")
+
+def _check_keys():
+    print(f"--- API KEY CHECK: OPENROUTER_API_KEY present? {'Yes' if OPENROUTER_API_KEY else 'No'} ---")
+    if OPENROUTER_API_KEY:
+        print(f"--- API KEY CHECK: OPENROUTER_API_KEY starts with: {OPENROUTER_API_KEY[:4]}... ---")
+
 MODEL = "openai/text-embedding-3-small"
 OPENROUTER_EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
 PERSIST_DIRECTORY = "./chroma_ipc_v1"
@@ -26,7 +30,6 @@ def _resolve_persist_directory() -> str:
     )
 
     candidates = [configured, local_to_file, workspace_root, script_folder]
-    candidates = [configured, local_to_file, workspace_root, script_folder]
     for candidate in candidates:
         if candidate.exists():
             print(f"--- DATABASE FOUND AT: {candidate} ---")
@@ -37,6 +40,7 @@ def _resolve_persist_directory() -> str:
 
 
 def _embed_text(text: str) -> list[float]:
+    _check_keys()
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -45,14 +49,23 @@ def _embed_text(text: str) -> list[float]:
         "model": MODEL,
         "input": text,
     }
+    print(f"--- CALLING OPENROUTER EMBEDDING: {MODEL} ---")
     response = requests.post(
         OPENROUTER_EMBEDDINGS_URL,
         headers=headers,
         json=payload,
         timeout=60,
     )
-    response.raise_for_status()
+    if response.status_code != 200:
+        print(f"--- OPENROUTER API ERROR: {response.status_code} - {response.text} ---")
+        response.raise_for_status()
+    
     body = response.json()
+    if "data" not in body or not body["data"]:
+        print(f"--- OPENROUTER UNEXPECTED RESPONSE: {body} ---")
+        raise ValueError("Invalid embedding response")
+
+    print(f"--- EMBEDDING SUCCESSFUL ---")
     return body["data"][0]["embedding"]
 
 

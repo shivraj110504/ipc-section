@@ -13,10 +13,13 @@ except (ImportError, ValueError):
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
-GEMINI_MODEL = "models/gemini-2.5-flash"
+def _check_gemini_key():
+    print(f"--- API KEY CHECK: GEMINI_API_KEY present? {'Yes' if GEMINI_API_KEY else 'No'} ---")
+    if GEMINI_API_KEY:
+        print(f"--- API KEY CHECK: GEMINI_API_KEY starts with: {GEMINI_API_KEY[:4]}... ---")
+
+GEMINI_MODEL = "models/gemini-1.5-flash"  # Switched to standard model
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
     f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
@@ -69,6 +72,7 @@ def run_similarity_gate(incident_text: str) -> dict:
 
 def predict_ipc_section(incident_text: str) -> dict:
     try:
+        _check_gemini_key()
         gate_result = run_similarity_gate(incident_text)
 
         if "llm_prompt" not in gate_result:
