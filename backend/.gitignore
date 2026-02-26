@@ -10,7 +10,7 @@ __pycache__/
 IPC_Pred_Rebuild/
 
 # ChromaDB local storage
-script/chroma_ipc_v1/
+# script/chroma_ipc_v1/
 
 # IDE
 .vscode/
