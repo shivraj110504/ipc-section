@@ -26,9 +26,13 @@ def _resolve_persist_directory() -> str:
     )
 
     candidates = [configured, local_to_file, workspace_root, script_folder]
+    candidates = [configured, local_to_file, workspace_root, script_folder]
     for candidate in candidates:
         if candidate.exists():
+            print(f"--- DATABASE FOUND AT: {candidate} ---")
             return str(candidate)
+    
+    print(f"--- WARNING: DATABASE NOT FOUND IN CANDIDATES. FALLING BACK TO: {candidates[0]} ---")
     return str(candidates[0])
 
 
@@ -110,6 +114,7 @@ def _retrieve_with_scores(incident_text: str) -> list[tuple[dict[str, Any], floa
 
     metadatas = query_result["metadatas"][0]
     distances = query_result["distances"][0]
+    print(f"--- DATABASE: FOUND {len(metadatas)} CANDIDATES ---")
 
     rows: list[tuple[dict[str, Any], float]] = []
     for metadata, distance in zip(metadatas, distances):

@@ -93,21 +93,42 @@ def predict_ipc_section(incident_text: str) -> dict:
             },
         }
 
-        print(f"--- CALLING GEMINI: {GEMINI_MODEL} ---")
-        response = requests.post(
-            GEMINI_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=60,
-        )
-        
-        if response.status_code != 200:
-            print(f"--- GEMINI API ERROR: {response.status_code} - {response.text} ---")
-            response.raise_for_status()
+        # List of models to try
+        models_to_try = [GEMINI_MODEL, "models/gemini-1.5-flash"]
+        raw_response = None
+        current_model_used = None
 
-        body = response.json()
-        raw_response = body["candidates"][0]["content"]["parts"][0]["text"]
-        print(f"--- GEMINI RAW RESPONSE: {raw_response[:100]}... ---")
+        for model_name in models_to_try:
+            print(f"--- CALLING GEMINI: {model_name} ---")
+            api_url = (
+                "https://generativelanguage.googleapis.com/v1beta/"
+                f"{model_name}:generateContent?key={GEMINI_API_KEY}"
+            )
+            
+            try:
+                response = requests.post(
+                    api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                )
+                
+                if response.status_code == 200:
+                    body = response.json()
+                    raw_response = body["candidates"][0]["content"]["parts"][0]["text"]
+                    current_model_used = model_name
+                    print(f"--- GEMINI SUCCESS WITH: {model_name} ---")
+                    break
+                else:
+                    print(f"--- GEMINI API ERROR ({model_name}): {response.status_code} - {response.text} ---")
+            except Exception as inner_e:
+                print(f"--- GEMINI REQUEST FAILED ({model_name}): {str(inner_e)} ---")
+
+        if not raw_response:
+            print("--- ALL GEMINI MODELS FAILED ---")
+            return _fallback_response()
+
+        print(f"--- GEMINI RAW RESPONSE FROM {current_model_used}: {raw_response[:100]}... ---")
 
         validated = validate_llm_response(raw_response, allowed_section_numbers)
 
