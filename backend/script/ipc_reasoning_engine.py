@@ -3,10 +3,10 @@ import os
 import requests
 
 try:
-    from script.llm_instruction_template import build_ipc_reasoning_prompt
-    from script.retrieve_sections import _retrieve_with_scores
-    from script.llm_validation_guard import validate_llm_response
-except ImportError:
+    from .llm_instruction_template import build_ipc_reasoning_prompt
+    from .retrieve_sections import _retrieve_with_scores
+    from .llm_validation_guard import validate_llm_response
+except (ImportError, ValueError):
     from llm_instruction_template import build_ipc_reasoning_prompt
     from retrieve_sections import _retrieve_with_scores
     from llm_validation_guard import validate_llm_response

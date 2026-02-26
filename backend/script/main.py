@@ -9,9 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 try:
-    from script.schemas import CaseInput
-    from script.ipc_reasoning_engine import predict_ipc_section
-except ImportError:
+    from .schemas import CaseInput
+    from .ipc_reasoning_engine import predict_ipc_section
+except (ImportError, ValueError):
     from schemas import CaseInput
     from ipc_reasoning_engine import predict_ipc_section
 
