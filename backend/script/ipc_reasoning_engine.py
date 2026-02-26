@@ -22,7 +22,7 @@ GEMINI_API_URL = (
     f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 )
 
-SIMILARITY_THRESHOLD = -0.60
+SIMILARITY_THRESHOLD = -5.0  # Temporarily broadened for debugging
 
 def _fallback_response() -> dict:
     return {
@@ -35,12 +35,17 @@ def _fallback_response() -> dict:
 
 def run_similarity_gate(incident_text: str) -> dict:
     try:
+        print(f"--- RUNNING GATE FOR: {incident_text[:50]}... ---")
         ranked_candidates = _retrieve_with_scores(incident_text)
         if not ranked_candidates:
+            print("--- GATE: NO CANDIDATES FOUND ---")
             return _fallback_response()
 
         top_similarity = float(ranked_candidates[0][1])
+        print(f"--- GATE: TOP SIMILARITY = {top_similarity} (THRESHOLD = {SIMILARITY_THRESHOLD}) ---")
+        
         if top_similarity < SIMILARITY_THRESHOLD:
+            print("--- GATE: SIMILARITY BELOW THRESHOLD ---")
             return _fallback_response()
 
         candidate_sections = [metadata for metadata, _ in ranked_candidates]
@@ -49,6 +54,7 @@ def run_similarity_gate(incident_text: str) -> dict:
         ]
 
         prompt = build_ipc_reasoning_prompt(incident_text, candidate_sections)
+        print("--- GATE: PROMPT BUILT ---")
 
         return {
             "incident_text": incident_text,
@@ -56,7 +62,8 @@ def run_similarity_gate(incident_text: str) -> dict:
             "allowed_section_numbers": allowed_section_numbers,
             "llm_prompt": prompt,
         }
-    except Exception:
+    except Exception as e:
+        print(f"--- GATE ERROR: {str(e)} ---")
         return _fallback_response()
 
 
@@ -65,6 +72,7 @@ def predict_ipc_section(incident_text: str) -> dict:
         gate_result = run_similarity_gate(incident_text)
 
         if "llm_prompt" not in gate_result:
+            print("--- PREDICT: GATE FAILED OR RETURNED FALLBACK ---")
             gate_result.setdefault("title", "")
             return gate_result
 
@@ -85,16 +93,21 @@ def predict_ipc_section(incident_text: str) -> dict:
             },
         }
 
+        print(f"--- CALLING GEMINI: {GEMINI_MODEL} ---")
         response = requests.post(
             GEMINI_API_URL,
             headers=headers,
             json=payload,
             timeout=60,
         )
-        response.raise_for_status()
+        
+        if response.status_code != 200:
+            print(f"--- GEMINI API ERROR: {response.status_code} - {response.text} ---")
+            response.raise_for_status()
 
         body = response.json()
         raw_response = body["candidates"][0]["content"]["parts"][0]["text"]
+        print(f"--- GEMINI RAW RESPONSE: {raw_response[:100]}... ---")
 
         validated = validate_llm_response(raw_response, allowed_section_numbers)
 
@@ -107,6 +120,8 @@ def predict_ipc_section(incident_text: str) -> dict:
                     break
 
         validated["title"] = title
+        print(f"--- PREDICTION SUCCESSFUL: {validated.get('predicted_sections')} ---")
         return validated
-    except Exception:
+    except Exception as e:
+        print(f"--- PREDICT ERROR: {str(e)} ---")
         return _fallback_response()
