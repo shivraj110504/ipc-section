@@ -104,43 +104,94 @@ def _format_result(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+import traceback
+
+def _keyword_search_fallback(text: str) -> list[tuple[dict[str, Any], float]]:
+    print("--- KEYWORD SEARCH FALLBACK STARTING ---")
+    try:
+        # Resolve dataset path
+        dataset_path = Path(__file__).resolve().parent.parent / "data" / "ipc_enriched_v1.json"
+        
+        if not dataset_path.exists():
+            print(f"--- FALLBACK ERROR: DATASET NOT FOUND AT {dataset_path} ---")
+            return []
+            
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            dataset = json.load(f)
+        
+        query_terms = [t.lower() for t in text.split() if len(t) > 2]
+        if not query_terms:
+            query_terms = [text.lower().strip()]
+            
+        scored_results = []
+        for item in dataset:
+            # Check title, summary, and keywords
+            search_blob = f"{item.get('title', '')} {item.get('summary', '')} {' '.join(item.get('keywords', []))}".lower()
+            
+            # Simple match count
+            match_count = sum(1 for term in query_terms if term in search_blob)
+            
+            if match_count > 0:
+                # Score is based on match density
+                score = 0.5 + (min(match_count / max(len(query_terms), 1), 1.0) * 0.4)
+                scored_results.append((_format_result(item), score))
+        
+        # Sort by score descending
+        scored_results.sort(key=lambda x: x[1], reverse=True)
+        print(f"--- KEYWORD SEARCH FOUND {len(scored_results)} RESULTS ---")
+        return scored_results[:TOP_K]
+        
+    except Exception as e:
+        print(f"--- KEYWORD SEARCH FATAL ERROR: {str(e)} ---")
+        traceback.print_exc()
+        return []
+
+
 def _retrieve_with_scores(incident_text: str) -> list[tuple[dict[str, Any], float]]:
-    client = chromadb.PersistentClient(path=_resolve_persist_directory())
-    collection = client.get_collection(name=COLLECTION_NAME)
+    try:
+        persist_dir = _resolve_persist_directory()
+        print(f"--- ATTEMPTING CHROMA INIT AT {persist_dir} ---")
+        client = chromadb.PersistentClient(path=persist_dir)
+        collection = client.get_collection(name=COLLECTION_NAME)
 
-    if incident_text.strip() == "":
-        all_rows = collection.get(include=["metadatas"])
-        metadatas = all_rows.get("metadatas", [])
-        ordered = sorted(
-            metadatas,
-            key=lambda row: _section_sort_key(str(row.get("section_number", ""))),
+        if incident_text.strip() == "":
+            all_rows = collection.get(include=["metadatas"])
+            metadatas = all_rows.get("metadatas", [])
+            ordered = sorted(
+                metadatas,
+                key=lambda row: _section_sort_key(str(row.get("section_number", ""))),
+            )
+            top_rows = ordered[:TOP_K]
+            return [(_format_result(row), 0.0) for row in top_rows]
+
+        query_embedding = _embed_text(incident_text)
+        query_result = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=TOP_K,
+            include=["embeddings", "metadatas", "distances"],
         )
-        top_rows = ordered[:TOP_K]
-        return [(_format_result(row), 0.0) for row in top_rows]
 
-    query_embedding = _embed_text(incident_text)
-    query_result = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=TOP_K,
-        include=["embeddings", "metadatas", "distances"],
-    )
+        metadatas = query_result["metadatas"][0]
+        distances = query_result["distances"][0]
+        print(f"--- DATABASE: FOUND {len(metadatas)} CANDIDATES ---")
 
-    metadatas = query_result["metadatas"][0]
-    distances = query_result["distances"][0]
-    print(f"--- DATABASE: FOUND {len(metadatas)} CANDIDATES ---")
+        rows: list[tuple[dict[str, Any], float]] = []
+        for metadata, distance in zip(metadatas, distances):
+            similarity = 1.0 - float(distance)
+            rows.append((_format_result(metadata), similarity))
 
-    rows: list[tuple[dict[str, Any], float]] = []
-    for metadata, distance in zip(metadatas, distances):
-        similarity = 1.0 - float(distance)
-        rows.append((_format_result(metadata), similarity))
-
-    rows.sort(
-        key=lambda row: (
-            -row[1],
-            _section_sort_key(str(row[0].get("section_number", ""))),
+        rows.sort(
+            key=lambda row: (
+                -row[1],
+                _section_sort_key(str(row[0].get("section_number", ""))),
+            )
         )
-    )
-    return rows[:TOP_K]
+        return rows[:TOP_K]
+    except Exception as e:
+        print(f"--- CHROMA ERROR DETECTED: {str(e)} ---")
+        traceback.print_exc()
+        print("--- SWITCHING TO FAILSAFE KEYWORD SEARCH ---")
+        return _keyword_search_fallback(incident_text)
 
 
 def retrieve_sections(incident_text: str) -> list[dict]:
